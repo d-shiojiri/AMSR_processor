@@ -1,23 +1,23 @@
 # AMSR Download / Merge / Query
 
-このリポジトリは、以下の流れで AMSR データを扱うためのものです。
+This repository provides a workflow to:
 
-1. `AMSR_download.sh` で JAXA G-Portal からダウンロード  
-2. `merge_amsr_l3_daily.py` で日次 NetCDF にマージ  
-3. `amsr_l3_query.py` で指定 datetime 範囲の観測を抽出
+1. Download AMSR products from JAXA G-Portal with `AMSR_download.sh`
+2. Merge daily L3 files into NetCDF with `merge_amsr_l3_daily.py`
+3. Query observations by datetime range with `amsr_l3_query.py`
 
 ---
 
-## 1. 前提
+## 1. Requirements
 
 - `bash`
-- `lftp`（SFTP 対応）
+- `lftp` (with SFTP support)
 - Python 3.10+
-- Python パッケージ:
+- Python packages:
   - `numpy`
   - `netCDF4`
 
-例:
+Install Python packages:
 
 ```bash
 python -m pip install numpy netCDF4
@@ -25,10 +25,11 @@ python -m pip install numpy netCDF4
 
 ---
 
-## 2. 認証ファイル（必須）
+## 2. Credentials file (required)
 
-`AMSR_download.sh` は `~/.gportal_sftp.env` を読み込みます。  
-まず次のファイルを作成してください。
+`AMSR_download.sh` reads credentials from `~/.gportal_sftp.env`.
+
+Create the file as:
 
 ```bash
 cat > ~/.gportal_sftp.env << 'EOF'
@@ -38,33 +39,33 @@ EOF
 chmod 600 ~/.gportal_sftp.env
 ```
 
-記法は **必ず** `KEY="value"` 形式にしてください。
+Use the exact `KEY="value"` format.
 
 ---
 
-## 3. ダウンロード
+## 3. Download AMSR data
 
 ```bash
 cd /data02/shiojiri/DATA/AMSR
 bash AMSR_download.sh
 ```
 
-### 補足
+Notes:
 
-- ダウンロード対象（AMSR-E/AMSR2、L2/L3）は `AMSR_download.sh` 冒頭の設定ブロックで切り替えます。
-- 現在のデフォルトは AMSR2 L3 (`GCOM-W.AMSR2_L3.SMC_10_3`) です。
-- 欠損ディレクトリは `missing_dirs.log` に記録されます。
+- Target product settings (AMSR-E/AMSR2, L2/L3) are selected by editing the config block at the top of `AMSR_download.sh`.
+- Current default is AMSR2 L3 (`GCOM-W.AMSR2_L3.SMC_10_3`).
+- Missing remote directories are logged to `missing_dirs.log`.
 
-出力先の例:
+Typical output roots:
 
 - `./download/AQUA.AMSR-E_AMSR2Format.L3.SMC_10.8/...`
 - `./download/GCOM-W.AMSR2_L3.SMC_10_3/...`
 
 ---
 
-## 4. NetCDF へマージ
+## 4. Merge to NetCDF
 
-AMSR-E + AMSR2 の L3 日次 HDF5（`*_01D_*.h5`）を統合します。
+Merge AMSR-E + AMSR2 daily L3 HDF5 files (`*_01D_*.h5`) into NetCDF:
 
 ```bash
 cd /data02/shiojiri/DATA/AMSR
@@ -74,29 +75,30 @@ python merge_amsr_l3_daily.py \
   --overwrite
 ```
 
-### 出力仕様（重要）
+### Output behavior
 
-- 次元: `(time, lat, lon)`
-- 同一日・同一格子で重複観測がある場合:
-  - 平均化せず、`A/D` ごとに slot 変数へ保存
-  - 例: `soil_moisture_A_01`, `soil_moisture_A_02`, `soil_moisture_D_01`, ...
-- 観測時刻も保存:
+- Dimensions: `(time, lat, lon)`
+- Duplicate observations at the same day/grid are **not averaged**
+- Observations are separated by orbit direction and slots:
+  - `soil_moisture_A_01`, `soil_moisture_A_02`, ...
+  - `soil_moisture_D_01`, `soil_moisture_D_02`, ...
+- Observation times are also stored:
   - `observation_time_min_A_XX`, `observation_time_min_D_XX`
-- 時刻補正:
-  - `>= 1440 min` は翌日へ
-  - `< 0 min` は前日へ
+- Day-shift correction:
+  - `>= 1440 min` is moved to next day
+  - `< 0 min` is moved to previous day
 
 ---
 
-## 5. 観測値の読み出し（datetime 範囲指定）
+## 5. Query observations by datetime range
 
-`amsr_l3_query.py` は、指定範囲の全観測を次のタプルで返します:
+`amsr_l3_query.py` returns all observations in a datetime range as:
 
 - `(soil_moisture, observation_datetime, lat, lon)`
 
-格子形状は保持せず、未観測 (`NaN`) は返しません。
+Grid shape is flattened, and unobserved (`NaN`) cells are excluded.
 
-### Python から利用
+### Python usage
 
 ```python
 import datetime as dt
@@ -104,7 +106,7 @@ from amsr_l3_query import AmsrL3ObservationReader
 
 reader = AmsrL3ObservationReader(
     "/data02/shiojiri/DATA/AMSR/processed/l3_daily",
-    interval_hours=3,  # 固定インターバルから cache_days 自動決定
+    interval_hours=3,  # auto-decide cache size from fixed interval
 )
 
 rows = reader.read_range(
@@ -116,7 +118,7 @@ print(len(rows))
 print(rows[0])  # (sm, datetime, lat, lon)
 ```
 
-### 反復利用（3時間 / 6時間 / 日単位）
+### Iterative usage (3-hour / 6-hour / daily)
 
 ```python
 import datetime as dt
@@ -124,7 +126,7 @@ from amsr_l3_query import AmsrL3ObservationReader
 
 reader = AmsrL3ObservationReader(
     "/data02/shiojiri/DATA/AMSR/processed/l3_daily",
-    interval_hours=6,  # 6時間ステップ想定
+    interval_hours=6,
 )
 
 for ws, we, rows in reader.iterate_windows(
@@ -135,7 +137,7 @@ for ws, we, rows in reader.iterate_windows(
     print(ws, we, len(rows))
 ```
 
-### CLI から確認
+### CLI usage
 
 ```bash
 python amsr_l3_query.py \
@@ -147,26 +149,26 @@ python amsr_l3_query.py \
 
 ---
 
-## 6. よく使うオプション
+## 6. Frequently used options
 
 ### `merge_amsr_l3_daily.py`
 
 - `--start-date YYYY-MM-DD`
 - `--end-date YYYY-MM-DD`
 - `--output-mode single|yearly`
-- `--output-file`（`single` モード時）
-- `--max-backward-days`（既定: `1`）
+- `--output-file` (for `single` mode)
+- `--max-backward-days` (default: `1`)
 
 ### `amsr_l3_query.py`
 
-- `--cache-days`（明示指定）
-- `--interval-hours`（自動 cache 設定用）
-- `--window-hours`（窓長を step と分離する場合）
+- `--cache-days` (explicit cache size)
+- `--interval-hours` (auto cache sizing from fixed step)
+- `--window-hours` (if query window differs from step)
 
 ---
 
-## 7. 注意点
+## 7. Notes
 
-- `AMSR_download.sh` は設定ブロックを書き換えて対象プロダクトを切替える設計です。
-- `merge_amsr_l3_daily.py` は `*_01D_*.h5` を対象にしています。
-- 時刻は UTC 前提で扱っています。
+- `AMSR_download.sh` is configured by editing its product block.
+- `merge_amsr_l3_daily.py` processes only `*_01D_*.h5` files.
+- Time handling is UTC-based.
