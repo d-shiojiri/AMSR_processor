@@ -130,23 +130,7 @@ rows = reader.read_range(
 )
 ```
 
-Read only one time window with `iterate_windows()`:
-
-```python
-import datetime as dt
-from amsr_l3_query import AmsrL3ObservationReader
-
-reader = AmsrL3ObservationReader("/data02/shiojiri/DATA/AMSR/processed/l3_daily")
-
-for ws, we, rows in reader.iterate_windows(
-    dt.datetime(2012, 7, 3, 0, 0, 0),
-    dt.datetime(2012, 7, 3, 23, 59, 59),
-    step=dt.timedelta(days=1),
-    window=dt.timedelta(days=1),
-):
-    print(ws, we, len(rows))
-    # executes exactly one loop
-```
+When only one step is needed and the window duration may change (hourly/6-hourly/daily/etc.), set `start_datetime` / `end_datetime` directly and call `read_range()` each time without adjusting `step` / `window` parameters.
 
 Useful reader utilities:
 
@@ -237,40 +221,18 @@ print(rows[0])
 ```
 
 ```python
-import datetime as dt
-from query_amsr_l3_0p5deg import AmsrUpsampledL3ObservationReader
-
-reader = AmsrUpsampledL3ObservationReader(
-    "processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc",
-    interval_hours=24,
-)
-
-for ws, we, rows in reader.iterate_windows(
-    dt.datetime(2012, 7, 1),
-    dt.datetime(2012, 7, 3, 23, 59, 59),
-    step=dt.timedelta(days=1),
-):
-    print(ws, we, len(rows))
-```
-
-Single-step example:
-
-```python
-import datetime as dt
 from query_amsr_l3_0p5deg import AmsrUpsampledL3ObservationReader
 
 reader = AmsrUpsampledL3ObservationReader(
     "processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc",
 )
 
-for ws, we, rows in reader.iterate_windows(
-    dt.datetime(2012, 7, 3),
-    dt.datetime(2012, 7, 3, 23, 59, 59),
-    step=dt.timedelta(days=1),
-    window=dt.timedelta(days=1),
-):
-    print(ws, we, len(rows))
-    # executes exactly one loop
+rows = reader.read_range(
+    "2012-07-03T00:00:00",
+    "2012-07-03T23:59:59",
+)
+print(len(rows))
+print(rows[0])  # one-step extraction
 ```
 
 `AmsrUpsampledL3ObservationReader` automatically detects the input type. It reads cell-level daily means for averaged 0.5-degree files (`soil_moisture` + `observation_count`), or falls back to `amsr_l3_query.py` behavior for legacy slot-format files.
