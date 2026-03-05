@@ -147,6 +147,25 @@ python amsr_l3_query.py \
   --limit 10
 ```
 
+### 0.5-degree upscaling
+
+Run after merge:
+
+```bash
+cd /data02/shiojiri/DATA/AMSR
+python upsample_amsr_l3_0p5deg.py \
+  processed/l3_daily \
+  processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg.nc \
+  --overwrite
+```
+
+Relative defaults are also supported:
+
+```bash
+cd /data02/shiojiri/DATA/AMSR
+python upsample_amsr_l3_0p5deg.py
+```
+
 ---
 
 ## 6. Frequently used options
@@ -158,6 +177,12 @@ python amsr_l3_query.py \
 - `--output-mode single|yearly`
 - `--output-file` (for `single` mode)
 - `--max-backward-days` (default: `1`)
+
+### `upsample_amsr_l3_0p5deg.py`
+
+- `input_path`: merged NetCDF file or directory (e.g., `processed/l3_daily`)
+- `output_path`: output NetCDF path
+- `--overwrite`: overwrite existing output
 
 ### `amsr_l3_query.py`
 
