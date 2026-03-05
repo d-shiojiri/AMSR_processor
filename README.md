@@ -4,7 +4,9 @@ This repository provides a workflow to:
 
 1. Download AMSR products from JAXA G-Portal with `AMSR_download.sh`
 2. Merge daily L3 files into NetCDF with `merge_amsr_l3_daily.py`
-3. Query observations by datetime range with `amsr_l3_query.py`
+3. Upscale merged daily data to 0.5-degree grid with `upscale_amsr_l3_0p5deg.py`
+4. Query observations or averaged 0.5-degree grid data by datetime range with
+   `amsr_l3_query.py` or `query_amsr_l3_0p5deg.py`
 
 ---
 
@@ -16,11 +18,12 @@ This repository provides a workflow to:
 - Python packages:
   - `numpy`
   - `netCDF4`
+  - `tqdm` (for progress bar display in upscaling)
 
 Install Python packages:
 
 ```bash
-python -m pip install numpy netCDF4
+python -m pip install numpy netCDF4 tqdm
 ```
 
 ---
@@ -92,7 +95,7 @@ python merge_amsr_l3_daily.py \
 
 ## 5. Query observations by datetime range
 
-`amsr_l3_query.py` returns all observations in a datetime range as:
+`amsr_l3_query.py` returns merged L3 observations in a datetime range as:
 
 - `(soil_moisture, observation_datetime, lat, lon)`
 
@@ -147,15 +150,32 @@ python amsr_l3_query.py \
   --limit 10
 ```
 
+### 0.5-degree query usage
+
+```bash
+python query_amsr_l3_0p5deg.py \
+  processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
+  2012-07-03T00:00:00 \
+  2012-07-03T23:59:59 \
+  --interval-hours 3 \
+  --limit 10
+```
+
+The output tuple is the same as `amsr_l3_query.py`:
+
+- `(soil_moisture, observation_datetime, lat, lon)`
+
+For 0.5-degree averaged files, `observation_datetime` is the day timestamp at `00:00:00`.
+
 ### 0.5-degree upscaling
 
 Run after merge:
 
 ```bash
 cd /data02/shiojiri/DATA/AMSR
-python upsample_amsr_l3_0p5deg.py \
+python upscale_amsr_l3_0p5deg.py \
   processed/l3_daily \
-  processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg.nc \
+  processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
   --overwrite
 ```
 
@@ -163,8 +183,42 @@ Relative defaults are also supported:
 
 ```bash
 cd /data02/shiojiri/DATA/AMSR
-python upsample_amsr_l3_0p5deg.py
+python upscale_amsr_l3_0p5deg.py
 ```
+
+### 0.5-degree query usage with Python
+
+```python
+from query_amsr_l3_0p5deg import read_upsampled_amsr_observations_in_range
+
+rows = read_upsampled_amsr_observations_in_range(
+    path="processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc",
+    start_datetime="2012-07-03T00:00:00",
+    end_datetime="2012-07-03T23:59:59",
+)
+
+print(len(rows))
+print(rows[0])
+```
+
+```python
+import datetime as dt
+from query_amsr_l3_0p5deg import AmsrUpsampledL3ObservationReader
+
+reader = AmsrUpsampledL3ObservationReader(
+    "processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc",
+    interval_hours=24,
+)
+
+for ws, we, rows in reader.iterate_windows(
+    dt.datetime(2012, 7, 1),
+    dt.datetime(2012, 7, 3, 23, 59, 59),
+    step=dt.timedelta(days=1),
+):
+    print(ws, we, len(rows))
+```
+
+`AmsrUpsampledL3ObservationReader` automatically detects the input type. It reads cell-level daily means for averaged 0.5-degree files (`soil_moisture` + `observation_count`), or falls back to `amsr_l3_query.py` behavior for legacy slot-format files.
 
 ---
 
@@ -178,11 +232,28 @@ python upsample_amsr_l3_0p5deg.py
 - `--output-file` (for `single` mode)
 - `--max-backward-days` (default: `1`)
 
-### `upsample_amsr_l3_0p5deg.py`
+### `upscale_amsr_l3_0p5deg.py`
 
 - `input_path`: merged NetCDF file or directory (e.g., `processed/l3_daily`)
 - `output_path`: output NetCDF path
 - `--overwrite`: overwrite existing output
+- `--workers N`: process per-day averaging in parallel (default: `min(4, cpu_count)`)
+- `--no-progress`: disable progress bar (`tqdm` if installed)
+- Output variables:
+  - `soil_moisture`: daily mean soil moisture in each 0.5-degree cell
+  - `observation_count`: number of observations used in each cell average
+- `time` dimension is daily (`time` values are days since 1970-01-01), with variables shaped `(time, lat, lon)`
+
+### `query_amsr_l3_0p5deg.py`
+
+- `path`: upsampled 0.5-degree NetCDF file or directory (default:
+  `processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc`)
+- `start`: start datetime (`YYYY-MM-DDTHH:MM:SS` or ISO format supported)
+- `end`: end datetime (`YYYY-MM-DDTHH:MM:SS` or ISO format supported)
+- `--cache-days`: explicit cache size in days
+- `--interval-hours`: fixed query step (hours), auto cache sizing if `--cache-days` is omitted
+- `--window-hours`: query window length (hours, optional)
+- `--cache-days`, `--interval-hours`, `--window-hours` are accepted for compatibility. For averaged files, returned `observation_datetime` is the day timestamp at `00:00:00`.
 
 ### `amsr_l3_query.py`
 
