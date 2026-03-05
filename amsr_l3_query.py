@@ -15,8 +15,6 @@ SLOT_PATTERN = re.compile(r"^soil_moisture_([AD])_(\d{2})$")
 SEC_PER_DAY = 86400
 EPOCH = dt.datetime(1970, 1, 1)
 
-ObservationTuple = Tuple[float, dt.datetime, float, float]
-
 
 def _to_datetime(value: dt.datetime | str) -> dt.datetime:
     if isinstance(value, dt.datetime):
@@ -29,8 +27,8 @@ def _to_epoch_seconds(value: dt.datetime) -> float:
     return (value - EPOCH).total_seconds()
 
 
-def _from_epoch_seconds(value: int) -> dt.datetime:
-    return EPOCH + dt.timedelta(seconds=int(value))
+def _from_epoch_seconds_array(values: np.ndarray) -> np.ndarray:
+    return values.astype("datetime64[s]")
 
 
 @dataclass(frozen=True)
@@ -234,48 +232,11 @@ class AmsrL3ObservationReader:
         self._put_cache(day_key, day_data)
         return day_data
 
-    @staticmethod
-    def _pack_tuples(
-        sm: np.ndarray,
-        obs_sec: np.ndarray,
-        lat: np.ndarray,
-        lon: np.ndarray,
-    ) -> List[ObservationTuple]:
-        out: List[ObservationTuple] = []
-        for i in range(sm.size):
-            out.append(
-                (
-                    float(sm[i]),
-                    _from_epoch_seconds(int(obs_sec[i])),
-                    float(lat[i]),
-                    float(lon[i]),
-                )
-            )
-        return out
-
-    def preload_range(self, start_datetime: dt.datetime | str, end_datetime: dt.datetime | str) -> None:
-        """
-        Preload day cache for iterative queries over the range.
-        """
-        start = _to_datetime(start_datetime)
-        end = _to_datetime(end_datetime)
-        if end < start:
-            raise ValueError("end_datetime must be >= start_datetime")
-
-        start_day = int(np.floor(_to_epoch_seconds(start) / SEC_PER_DAY))
-        end_day = int(np.floor(_to_epoch_seconds(end) / SEC_PER_DAY))
-        for day in range(start_day, end_day + 1):
-            self._load_day(day)
-
-    def read_range(
+    def _read_range_arrays(
         self,
         start_datetime: dt.datetime | str,
         end_datetime: dt.datetime | str,
-    ) -> List[ObservationTuple]:
-        """
-        Return all observations in [start_datetime, end_datetime] as:
-          (soil_moisture, observation_datetime, lat, lon)
-        """
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         start = _to_datetime(start_datetime)
         end = _to_datetime(end_datetime)
         if end < start:
@@ -304,7 +265,12 @@ class AmsrL3ObservationReader:
             lon_parts.append(day_data.lon[mask])
 
         if not sm_parts:
-            return []
+            return (
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.float32),
+            )
 
         sm = np.concatenate(sm_parts)
         obs_sec = np.concatenate(sec_parts)
@@ -312,7 +278,43 @@ class AmsrL3ObservationReader:
         lon = np.concatenate(lon_parts)
 
         order = np.argsort(obs_sec, kind="mergesort")
-        return self._pack_tuples(sm[order], obs_sec[order], lat[order], lon[order])
+        return (
+            sm[order].astype(np.float32, copy=False),
+            obs_sec[order],
+            lat[order].astype(np.float32, copy=False),
+            lon[order].astype(np.float32, copy=False),
+        )
+
+    def preload_range(self, start_datetime: dt.datetime | str, end_datetime: dt.datetime | str) -> None:
+        """
+        Preload day cache for iterative queries over the range.
+        """
+        start = _to_datetime(start_datetime)
+        end = _to_datetime(end_datetime)
+        if end < start:
+            raise ValueError("end_datetime must be >= start_datetime")
+
+        start_day = int(np.floor(_to_epoch_seconds(start) / SEC_PER_DAY))
+        end_day = int(np.floor(_to_epoch_seconds(end) / SEC_PER_DAY))
+        for day in range(start_day, end_day + 1):
+            self._load_day(day)
+
+    def read_range(
+        self,
+        start_datetime: dt.datetime | str,
+        end_datetime: dt.datetime | str,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Return all observations in [start_datetime, end_datetime] as arrays:
+          (soil_moisture, observation_time, lat, lon)
+        where observation_time is datetime64[s].
+        """
+        start = _to_datetime(start_datetime)
+        end = _to_datetime(end_datetime)
+        if end < start:
+            raise ValueError("end_datetime must be >= start_datetime")
+        sm, obs_sec, lat, lon = self._read_range_arrays(start, end)
+        return sm, _from_epoch_seconds_array(obs_sec), lat, lon
 
     def iterate_windows(
         self,
@@ -320,7 +322,7 @@ class AmsrL3ObservationReader:
         end_datetime: dt.datetime | str,
         step: dt.timedelta,
         window: dt.timedelta | None = None,
-    ) -> Iterator[Tuple[dt.datetime, dt.datetime, List[ObservationTuple]]]:
+    ) -> Iterator[Tuple[dt.datetime, dt.datetime, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         """
         Iterate range queries efficiently with shared cache.
 
@@ -349,10 +351,13 @@ class AmsrL3ObservationReader:
             # intermediate windows are treated as [cur, cur_end).
             query_end = cur_end if cur_end >= end else (cur_end - eps)
             if query_end >= cur:
-                rows = self.read_range(cur, query_end)
+                sm, obs_time, lat, lon = self.read_range(cur, query_end)
             else:
-                rows = []
-            yield cur, cur_end, rows
+                sm = np.empty(0, dtype=np.float32)
+                obs_time = np.empty(0, dtype="datetime64[s]")
+                lat = np.empty(0, dtype=np.float32)
+                lon = np.empty(0, dtype=np.float32)
+            yield cur, cur_end, sm, obs_time, lat, lon
             cur = cur + step
 
 
@@ -363,7 +368,7 @@ def read_amsr_observations_in_range(
     max_cache_days: int | None = None,
     interval_hours: float | None = None,
     window_hours: float | None = None,
-) -> List[ObservationTuple]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Convenience wrapper.
     """
@@ -399,7 +404,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    out = read_amsr_observations_in_range(
+    sm, obs_time, lat, lon = read_amsr_observations_in_range(
         args.path,
         args.start,
         args.end,
@@ -407,6 +412,6 @@ if __name__ == "__main__":
         interval_hours=args.interval_hours,
         window_hours=args.window_hours,
     )
-    print(f"count={len(out)}")
-    for row in out[: args.limit]:
-        print(row)
+    print(f"count={len(sm)}")
+    for i in range(min(args.limit, len(sm))):
+        print(sm[i], obs_time[i], lat[i], lon[i])

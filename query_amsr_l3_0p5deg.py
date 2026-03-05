@@ -3,20 +3,19 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import OrderedDict
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Tuple
+from typing import Iterator
 
 import numpy as np
 from netCDF4 import Dataset
 
 from amsr_l3_query import (
     AmsrL3ObservationReader,
-    ObservationTuple,
 )
 
 EPOCH = dt.datetime(1970, 1, 1)
 SEC_PER_DAY = 86400
+ObservationArrayResult = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
 def _to_datetime(value: dt.datetime | str) -> dt.datetime:
@@ -29,11 +28,7 @@ def _to_epoch_seconds(value: dt.datetime) -> float:
     return (value - EPOCH).total_seconds()
 
 
-def _from_epoch_seconds(value: int) -> dt.datetime:
-    return EPOCH + dt.timedelta(seconds=int(value))
-
-
-def _list_input_files(path: Path) -> List[Path]:
+def _list_input_files(path: Path) -> list[Path]:
     if path.is_file():
         if path.suffix.lower() != ".nc":
             raise ValueError(f"Input file must be .nc: {path}")
@@ -52,20 +47,6 @@ def _is_averaged_file(path: Path) -> bool:
             and "observation_count" in ds.variables
             and "time" in ds.variables
         )
-
-
-@dataclass(frozen=True)
-class DayChunkRef:
-    file_path: Path
-    time_index: int
-
-
-@dataclass
-class DayObservationArray:
-    sm: np.ndarray
-    obs_sec: np.ndarray
-    lat: np.ndarray
-    lon: np.ndarray
 
 
 class Amsr0p5AveragedReader:
@@ -89,8 +70,8 @@ class Amsr0p5AveragedReader:
             raise ValueError("max_cache_days must be >= 1")
         self.max_cache_days = max_cache_days
 
-        self.cache: OrderedDict[int, DayObservationArray] = OrderedDict()
-        self.day_index: Dict[int, List[DayChunkRef]] = {}
+        self.cache: OrderedDict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = OrderedDict()
+        self.day_index: dict[int, list[tuple[Path, int]]] = {}
         self._lat: np.ndarray | None = None
         self._lon: np.ndarray | None = None
         self._build_index()
@@ -115,21 +96,18 @@ class Amsr0p5AveragedReader:
 
                 for t_idx, day in enumerate(times):
                     day_i = int(day)
-                    self.day_index.setdefault(day_i, []).append(DayChunkRef(file_path=fp, time_index=int(t_idx)))
+                    self.day_index.setdefault(day_i, []).append((fp, int(t_idx)))
 
         if self._lat is None or self._lon is None or not self.day_index:
             raise ValueError(f"No averaged AMSR 0.5-degree files found under: {self.path}")
 
-    def _put_cache(self, day_key: int, day_data: DayObservationArray) -> None:
+    def _put_cache(self, day_key: int, day_data: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]) -> None:
         self.cache[day_key] = day_data
         self.cache.move_to_end(day_key)
         while len(self.cache) > self.max_cache_days:
             self.cache.popitem(last=False)
 
-    def clear_cache(self) -> None:
-        self.cache.clear()
-
-    def _load_day(self, day_key: int) -> DayObservationArray:
+    def _load_day(self, day_key: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         cached = self.cache.get(day_key)
         if cached is not None:
             self.cache.move_to_end(day_key)
@@ -137,25 +115,25 @@ class Amsr0p5AveragedReader:
 
         refs = self.day_index.get(day_key, [])
         if not refs:
-            empty = DayObservationArray(
-                sm=np.empty(0, dtype=np.float32),
-                obs_sec=np.empty(0, dtype=np.int64),
-                lat=np.empty(0, dtype=np.float32),
-                lon=np.empty(0, dtype=np.float32),
+            empty = (
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.float32),
             )
             self._put_cache(day_key, empty)
             return empty
 
-        sm_parts: List[np.ndarray] = []
-        sec_parts: List[np.ndarray] = []
-        lat_parts: List[np.ndarray] = []
-        lon_parts: List[np.ndarray] = []
+        sm_parts: list[np.ndarray] = []
+        sec_parts: list[np.ndarray] = []
+        lat_parts: list[np.ndarray] = []
+        lon_parts: list[np.ndarray] = []
         day_sec0 = day_key * SEC_PER_DAY
 
-        for ref in refs:
-            with Dataset(ref.file_path) as ds:
-                sm_2d = np.array(ds.variables["soil_moisture"][ref.time_index, :, :], dtype=np.float32)
-                count_2d = np.array(ds.variables["observation_count"][ref.time_index, :, :], dtype=np.int32)
+        for file_path, time_index in refs:
+            with Dataset(file_path) as ds:
+                sm_2d = np.array(ds.variables["soil_moisture"][time_index, :, :], dtype=np.float32)
+                count_2d = np.array(ds.variables["observation_count"][time_index, :, :], dtype=np.int32)
                 valid = np.isfinite(sm_2d) & (count_2d > 0)
                 if not np.any(valid):
                     continue
@@ -167,11 +145,11 @@ class Amsr0p5AveragedReader:
                 lon_parts.append(self._lon[lon_idx] if self._lon is not None else np.empty(0, dtype=np.float32))
 
         if not sm_parts:
-            day_data = DayObservationArray(
-                sm=np.empty(0, dtype=np.float32),
-                obs_sec=np.empty(0, dtype=np.int64),
-                lat=np.empty(0, dtype=np.float32),
-                lon=np.empty(0, dtype=np.float32),
+            day_data = (
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.float32),
             )
             self._put_cache(day_key, day_data)
             return day_data
@@ -180,7 +158,7 @@ class Amsr0p5AveragedReader:
         sec_all = np.concatenate(sec_parts)
         lat_all = np.concatenate(lat_parts)
         lon_all = np.concatenate(lon_parts)
-        day_data = DayObservationArray(sm=sm_all, obs_sec=sec_all, lat=lat_all, lon=lon_all)
+        day_data = (sm_all, sec_all, lat_all, lon_all)
         self._put_cache(day_key, day_data)
         return day_data
 
@@ -188,7 +166,12 @@ class Amsr0p5AveragedReader:
         self,
         start_datetime: dt.datetime | str,
         end_datetime: dt.datetime | str,
-    ) -> List[ObservationTuple]:
+    ) -> ObservationArrayResult:
+        """
+        Return all observations in [start_datetime, end_datetime] as arrays:
+          (soil_moisture, observation_time, lat, lon)
+        where observation_time is datetime64[s].
+        """
         start = _to_datetime(start_datetime)
         end = _to_datetime(end_datetime)
         if end < start:
@@ -198,42 +181,43 @@ class Amsr0p5AveragedReader:
         end_sec = _to_epoch_seconds(end)
         start_day = int(np.floor(start_sec / SEC_PER_DAY))
         end_day = int(np.floor(end_sec / SEC_PER_DAY))
-
-        sm_parts: List[np.ndarray] = []
-        sec_parts: List[np.ndarray] = []
-        lat_parts: List[np.ndarray] = []
-        lon_parts: List[np.ndarray] = []
+        sm_parts: list[np.ndarray] = []
+        sec_parts: list[np.ndarray] = []
+        lat_parts: list[np.ndarray] = []
+        lon_parts: list[np.ndarray] = []
 
         for day in range(start_day, end_day + 1):
             day_data = self._load_day(day)
-            if day_data.sm.size == 0:
+            if day_data[0].size == 0:
                 continue
 
-            mask = (day_data.obs_sec >= start_sec) & (day_data.obs_sec <= end_sec)
+            mask = (day_data[1] >= start_sec) & (day_data[1] <= end_sec)
             if not np.any(mask):
                 continue
-            sm_parts.append(day_data.sm[mask])
-            sec_parts.append(day_data.obs_sec[mask])
-            lat_parts.append(day_data.lat[mask])
-            lon_parts.append(day_data.lon[mask])
+            sm_parts.append(day_data[0][mask])
+            sec_parts.append(day_data[1][mask])
+            lat_parts.append(day_data[2][mask])
+            lon_parts.append(day_data[3][mask])
 
         if not sm_parts:
-            return []
+            return (
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype="datetime64[s]"),
+                np.empty(0, dtype=np.float32),
+                np.empty(0, dtype=np.float32),
+            )
 
         sm = np.concatenate(sm_parts)
         obs_sec = np.concatenate(sec_parts)
         lat = np.concatenate(lat_parts)
         lon = np.concatenate(lon_parts)
         order = np.argsort(obs_sec, kind="mergesort")
-        return [
-            (
-                float(sm[i]),
-                _from_epoch_seconds(int(obs_sec[i])),
-                float(lat[i]),
-                float(lon[i]),
-            )
-            for i in order
-        ]
+        return (
+            sm[order].astype(np.float32, copy=False),
+            obs_sec[order].astype("datetime64[s]", copy=False),
+            lat[order].astype(np.float32, copy=False),
+            lon[order].astype(np.float32, copy=False),
+        )
 
     def iterate_windows(
         self,
@@ -241,7 +225,7 @@ class Amsr0p5AveragedReader:
         end_datetime: dt.datetime | str,
         step: dt.timedelta,
         window: dt.timedelta | None = None,
-    ) -> Iterator[Tuple[dt.datetime, dt.datetime, List[ObservationTuple]]]:
+    ) -> Iterator[tuple[dt.datetime, dt.datetime, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         start = _to_datetime(start_datetime)
         end = _to_datetime(end_datetime)
         if end < start:
@@ -259,10 +243,13 @@ class Amsr0p5AveragedReader:
             cur_end = min(cur + win, end)
             query_end = cur_end if cur_end >= end else (cur_end - eps)
             if query_end >= cur:
-                rows = self.read_range(cur, query_end)
+                sm, obs_time, lat, lon = self.read_range(cur, query_end)
             else:
-                rows = []
-            yield cur, cur_end, rows
+                sm = np.empty(0, dtype=np.float32)
+                obs_time = np.empty(0, dtype="datetime64[s]")
+                lat = np.empty(0, dtype=np.float32)
+                lon = np.empty(0, dtype=np.float32)
+            yield cur, cur_end, sm, obs_time, lat, lon
             cur = cur + step
 
 
@@ -280,8 +267,7 @@ class AmsrUpsampledL3ObservationReader:
         interval_hours: float | None = None,
         window_hours: float | None = None,
     ) -> None:
-        self.path = Path(path)
-        first = _list_input_files(self.path)[0]
+        first = _list_input_files(Path(path))[0]
         if _is_averaged_file(first):
             if max_cache_days is None:
                 if interval_hours is None:
@@ -291,16 +277,20 @@ class AmsrUpsampledL3ObservationReader:
                         interval_hours=interval_hours,
                         window_hours=window_hours,
                     )
-            self._inner = Amsr0p5AveragedReader(self.path, max_cache_days=max_cache_days)
+            self._inner = Amsr0p5AveragedReader(Path(path), max_cache_days=max_cache_days)
         else:
             self._inner = AmsrL3ObservationReader(
-                self.path,
+                Path(path),
                 max_cache_days=max_cache_days,
                 interval_hours=interval_hours,
                 window_hours=window_hours,
             )
 
-    def read_range(self, start_datetime: dt.datetime | str, end_datetime: dt.datetime | str) -> List[ObservationTuple]:
+    def read_range(
+        self,
+        start_datetime: dt.datetime | str,
+        end_datetime: dt.datetime | str,
+    ) -> ObservationArrayResult:
         return self._inner.read_range(start_datetime, end_datetime)
 
     def iterate_windows(
@@ -309,7 +299,7 @@ class AmsrUpsampledL3ObservationReader:
         end_datetime: dt.datetime | str,
         step: dt.timedelta,
         window: dt.timedelta | None = None,
-    ) -> Iterator[Tuple[dt.datetime, dt.datetime, List[ObservationTuple]]]:
+    ) -> Iterator[tuple[dt.datetime, dt.datetime, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         return self._inner.iterate_windows(start_datetime, end_datetime, step, window)
 
 
@@ -320,10 +310,11 @@ def read_upsampled_amsr_observations_in_range(
     max_cache_days: int | None = None,
     interval_hours: float | None = None,
     window_hours: float | None = None,
-) -> List[ObservationTuple]:
+) -> ObservationArrayResult:
     """
-    Return all upsampled/averaged AMSR observations in [start_datetime, end_datetime] as:
-      (soil_moisture, observation_datetime, lat, lon)
+    Return all upsampled/averaged AMSR observations in [start_datetime, end_datetime] as arrays:
+      (soil_moisture, observation_time, lat, lon)
+      where observation_time is datetime64[s].
     """
     if start_datetime is None or end_datetime is None:
         raise ValueError("start_datetime and end_datetime are required")
@@ -382,7 +373,7 @@ def _parse_args() -> "argparse.Namespace":
 def main() -> None:
     args = _parse_args()
 
-    out = read_upsampled_amsr_observations_in_range(
+    sm, obs_time, lat, lon = read_upsampled_amsr_observations_in_range(
         args.path,
         args.start,
         args.end,
@@ -391,9 +382,9 @@ def main() -> None:
         window_hours=args.window_hours,
     )
 
-    print(f"count={len(out)}")
-    for row in out[: args.limit]:
-        print(row)
+    print(f"count={len(sm)}")
+    for i in range(min(args.limit, len(sm))):
+        print(sm[i], obs_time[i], lat[i], lon[i])
 
 
 if __name__ == "__main__":

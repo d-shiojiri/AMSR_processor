@@ -97,7 +97,7 @@ python merge_amsr_l3_daily.py \
 
 `amsr_l3_query.py` returns merged L3 observations in a datetime range as:
 
-- `(soil_moisture, observation_datetime, lat, lon)`
+- `(soil_moisture, observation_time, lat, lon)`
 
 Grid shape is flattened, and unobserved (`NaN`) cells are excluded.
 
@@ -112,19 +112,19 @@ reader = AmsrL3ObservationReader(
     interval_hours=3,  # auto-decide cache size from fixed interval
 )
 
-rows = reader.read_range(
+sm, obs_time, lat, lon = reader.read_range(
     "2012-07-03T00:00:00",
     "2012-07-03T05:59:59",
 )
 
-print(len(rows))
-print(rows[0])  # (sm, datetime, lat, lon)
+print(len(sm))
+print(sm[0], obs_time[0], lat[0], lon[0])  # one-step output
 ```
 
-Use `read_range()` when you only need one range extraction:
+Use `read_range()` for ndarray output in one-shot extraction:
 
 ```python
-rows = reader.read_range(
+sm, obs_time, lat, lon = reader.read_range(
     "2012-07-03T00:00:00",
     "2012-07-03T05:59:59",
 )
@@ -137,6 +137,7 @@ Useful reader utilities:
 - `preload_range(start_datetime, end_datetime)`: preloads day data into cache before loops.
 - `clear_cache()`: manually clear in-memory cache.
 - `AmsrL3ObservationReader.suggest_cache_days(interval_hours, window_hours=None)`: convenience for `max_cache_days`.
+- `read_amsr_observations_in_range(...)`: one-shot ndarray extraction helper returning `(soil_moisture, observation_time, lat, lon)`.
 
 ### Iterative usage (3-hour / 6-hour / daily)
 
@@ -149,12 +150,12 @@ reader = AmsrL3ObservationReader(
     interval_hours=6,
 )
 
-for ws, we, rows in reader.iterate_windows(
+for ws, we, sm, obs_time, lat, lon in reader.iterate_windows(
     "2012-07-01T00:00:00",
     "2012-07-03T23:59:59",
     step=dt.timedelta(hours=6),
 ):
-    print(ws, we, len(rows))
+    print(ws, we, len(sm))
 ```
 
 `iterate_windows()` is preferred when you process many repeated intervals (e.g. 3-hour / 6-hour / daily windows) with one reader.
@@ -180,11 +181,9 @@ python query_amsr_l3_0p5deg.py \
   --limit 10
 ```
 
-The output tuple is the same as `amsr_l3_query.py`:
-
-- `(soil_moisture, observation_datetime, lat, lon)`
-
-For 0.5-degree averaged files, `observation_datetime` is the day timestamp at `00:00:00`.
+The CLI prints values from flattened arrays:
+`soil_moisture`, `observation_time`, `lat`, `lon`.
+For 0.5-degree averaged files, printed `observation_time` is the day timestamp at `00:00:00`.
 
 ### 0.5-degree upscaling
 
@@ -208,36 +207,60 @@ python upscale_amsr_l3_0p5deg.py
 ### 0.5-degree query usage with Python
 
 ```python
+from query_amsr_l3_0p5deg import Amsr0p5AveragedReader
+
+reader = Amsr0p5AveragedReader(
+    "processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc",
+    max_cache_days=8,
+)
+sm, obs_time, lat, lon = reader.read_range(
+    "2012-07-03T00:00:00",
+    "2012-07-03T23:59:59",
+)
+print(len(sm))
+print(sm[0], obs_time[0], lat[0], lon[0])  # one-step extraction
+
+from query_amsr_l3_0p5deg import AmsrUpsampledL3ObservationReader
+
+# Compatibility wrapper (0.5-degree or legacy slot-style files)
+reader = AmsrUpsampledL3ObservationReader(
+    "processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc",
+)
+sm, obs_time, lat, lon = reader.read_range(
+    "2012-07-03T00:00:00",
+    "2012-07-03T23:59:59",
+)
+print(len(sm))
+print(sm[0], obs_time[0], lat[0], lon[0])  # one-step extraction
+```
+
+Common API:
+
+```python
+# Return ndarray tuple for one range
+sm, obs_time, lat, lon = reader.read_range(start_dt, end_dt)
+
+# Iterate fixed windows efficiently (step/window in datetime.timedelta)
+for ws, we, sm, obs_time, lat, lon in reader.iterate_windows(start, end, step, window=None):
+    ...
+```
+
+```python
 from query_amsr_l3_0p5deg import read_upsampled_amsr_observations_in_range
 
-rows = read_upsampled_amsr_observations_in_range(
+sm, obs_time, lat, lon = read_upsampled_amsr_observations_in_range(
     path="processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc",
     start_datetime="2012-07-03T00:00:00",
     end_datetime="2012-07-03T23:59:59",
 )
 
-print(len(rows))
-print(rows[0])
-```
-
-```python
-from query_amsr_l3_0p5deg import AmsrUpsampledL3ObservationReader
-
-reader = AmsrUpsampledL3ObservationReader(
-    "processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc",
-)
-
-rows = reader.read_range(
-    "2012-07-03T00:00:00",
-    "2012-07-03T23:59:59",
-)
-print(len(rows))
-print(rows[0])  # one-step extraction
+print(len(sm))
+print(sm[0], obs_time[0], lat[0], lon[0])
 ```
 
 `AmsrUpsampledL3ObservationReader` automatically detects the input type. It reads cell-level daily means for averaged 0.5-degree files (`soil_moisture` + `observation_count`), or falls back to `amsr_l3_query.py` behavior for legacy slot-format files.
-
-For 0.5-degree averaged files, use `read_range()` through `AmsrUpsampledL3ObservationReader.read_range(...)` (via the class or `read_upsampled_amsr_observations_in_range`). `preload_range()` is available when the input is legacy slot format; for averaged 0.5-degree files, the class uses per-day cached arrays and repeated `read_range()`/`iterate_windows()` access is already efficient.
+For array-oriented pipelines, use `read_upsampled_amsr_observations_in_range(...)` or `AmsrUpsampledL3ObservationReader.read_range(...)`.
+For 0.5-degree averaged files, use `read_range()` through `AmsrUpsampledL3ObservationReader` or `Amsr0p5AveragedReader`.
 
 ---
 
@@ -272,8 +295,11 @@ For 0.5-degree averaged files, use `read_range()` through `AmsrUpsampledL3Observ
 - `--cache-days`: explicit cache size in days
 - `--interval-hours`: fixed query step (hours), auto cache sizing if `--cache-days` is omitted
 - `--window-hours`: query window length (hours, optional)
-- `--cache-days`, `--interval-hours`, `--window-hours` are accepted for compatibility. For averaged files, returned `observation_datetime` is the day timestamp at `00:00:00`.
+- `--cache-days`, `--interval-hours`, `--window-hours` are accepted.
+  - If `--cache-days` is omitted, it is auto-decided from `--interval-hours` and `--window-hours` (legacy or averaged).
 - Helper function: `read_upsampled_amsr_observations_in_range(path, start_datetime, end_datetime, ...)` is available for one-shot read.
+- `Amsr0p5AveragedReader`: dedicated reader for averaged 0.5-degree files.
+- `AmsrUpsampledL3ObservationReader`: auto-detecting compatibility reader for averaged/legacy files.
 
 ### `amsr_l3_query.py`
 
