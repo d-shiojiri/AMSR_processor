@@ -121,6 +121,21 @@ print(len(rows))
 print(rows[0])  # (sm, datetime, lat, lon)
 ```
 
+Use `read_range()` when you only need one range extraction:
+
+```python
+rows = reader.read_range(
+    "2012-07-03T00:00:00",
+    "2012-07-03T05:59:59",
+)
+```
+
+Useful reader utilities:
+
+- `preload_range(start_datetime, end_datetime)`: preloads day data into cache before loops.
+- `clear_cache()`: manually clear in-memory cache.
+- `AmsrL3ObservationReader.suggest_cache_days(interval_hours, window_hours=None)`: convenience for `max_cache_days`.
+
 ### Iterative usage (3-hour / 6-hour / daily)
 
 ```python
@@ -139,6 +154,8 @@ for ws, we, rows in reader.iterate_windows(
 ):
     print(ws, we, len(rows))
 ```
+
+`iterate_windows()` is preferred when you process many repeated intervals (e.g. 3-hour / 6-hour / daily windows) with one reader.
 
 ### CLI usage
 
@@ -220,6 +237,8 @@ for ws, we, rows in reader.iterate_windows(
 
 `AmsrUpsampledL3ObservationReader` automatically detects the input type. It reads cell-level daily means for averaged 0.5-degree files (`soil_moisture` + `observation_count`), or falls back to `amsr_l3_query.py` behavior for legacy slot-format files.
 
+For 0.5-degree averaged files, use `read_range()` through `AmsrUpsampledL3ObservationReader.read_range(...)` (via the class or `read_upsampled_amsr_observations_in_range`). `preload_range()` is available when the input is legacy slot format; for averaged 0.5-degree files, the class uses per-day cached arrays and repeated `read_range()`/`iterate_windows()` access is already efficient.
+
 ---
 
 ## 6. Frequently used options
@@ -254,9 +273,11 @@ for ws, we, rows in reader.iterate_windows(
 - `--interval-hours`: fixed query step (hours), auto cache sizing if `--cache-days` is omitted
 - `--window-hours`: query window length (hours, optional)
 - `--cache-days`, `--interval-hours`, `--window-hours` are accepted for compatibility. For averaged files, returned `observation_datetime` is the day timestamp at `00:00:00`.
+- Helper function: `read_upsampled_amsr_observations_in_range(path, start_datetime, end_datetime, ...)` is available for one-shot read.
 
 ### `amsr_l3_query.py`
 
+- `read_amsr_observations_in_range(path, start_datetime, end_datetime, ...)` is available for one-shot read.
 - `--cache-days` (explicit cache size)
 - `--interval-hours` (auto cache sizing from fixed step)
 - `--window-hours` (if query window differs from step)
