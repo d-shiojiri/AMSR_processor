@@ -1,0 +1,5 @@
+{
+  "path_template": "/data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/{year}/SoilMoistV.nc",
+  "start_year": 2013,
+  "end_year": 2022
+}
