@@ -162,16 +162,9 @@ Example with yearly SoilMoistV references:
 
 ```bash
 python cdf_match_amsr.py processed/l3_daily \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2013/SoilMoistV.nc \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2014/SoilMoistV.nc \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2015/SoilMoistV.nc \
   --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2016/SoilMoistV.nc \
   --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2017/SoilMoistV.nc \
   --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2018/SoilMoistV.nc \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2019/SoilMoistV.nc \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2020/SoilMoistV.nc \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2021/SoilMoistV.nc \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2022/SoilMoistV.nc \
   --start 2016-01-01T00:00:00 \
   --end 2018-12-31T23:59:59 \
   --output-dir processed/l3_daily_cdf \
