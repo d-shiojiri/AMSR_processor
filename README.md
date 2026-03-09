@@ -127,6 +127,7 @@ Output variables:
 
 - `soil_moisture(time, lat, lon)`
 - `observation_count(time, lat, lon)`
+- `observation_time_min(time, lat, lon)` (daily mean of in-day observation minutes)
 
 `time` is daily (days since 1970-01-01).
 

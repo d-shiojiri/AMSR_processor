@@ -118,6 +118,15 @@ class UpscaledNetCDFWriter:
             chunksizes=(1, min(180, nlat), min(360, nlon)),
             fill_value=np.int32(0),
         )
+        self.var_obs_time_min = self.ds.createVariable(
+            "observation_time_min",
+            "f4",
+            ("time", "lat", "lon"),
+            zlib=True,
+            complevel=4,
+            chunksizes=(1, min(180, nlat), min(360, nlon)),
+            fill_value=np.float32(np.nan),
+        )
 
         var_lat[:] = lat.astype(np.float32)
         var_lon[:] = lon.astype(np.float32)
@@ -132,6 +141,11 @@ class UpscaledNetCDFWriter:
         self.var_count.units = "1"
         self.var_count.long_name = "number of merged observations used in daily average"
         self.var_count.comment = "Duplicates preserved by raw accumulation before averaging."
+        self.var_obs_time_min.units = "minutes since 00:00 UTC of corresponding time day"
+        self.var_obs_time_min.long_name = "daily mean observation time (0.5 degree)"
+        self.var_obs_time_min.comment = (
+            "Mean observation_time_min over all observations used in the daily cell average."
+        )
 
         self.time_index = 0
 
@@ -143,17 +157,28 @@ class UpscaledNetCDFWriter:
         self.time_index += 1
         return cur
 
-    def write_day(self, day_index: int, mean_flat: np.ndarray, count_flat: np.ndarray, nlat: int, nlon: int) -> None:
+    def write_day(
+        self,
+        day_index: int,
+        soil_sum_flat: np.ndarray,
+        time_min_sum_flat: np.ndarray,
+        count_flat: np.ndarray,
+        nlat: int,
+        nlon: int,
+    ) -> None:
         self.write_time(day_index)
         t = self.next_time()
 
-        mean_grid = np.full((nlat * nlon,), np.nan, dtype=np.float32)
+        soil_mean_grid = np.full((nlat * nlon,), np.nan, dtype=np.float32)
+        time_mean_grid = np.full((nlat * nlon,), np.nan, dtype=np.float32)
         idx = count_flat > 0
         if np.any(idx):
-            mean_grid[idx] = (mean_flat[idx] / count_flat[idx]).astype(np.float32)
+            soil_mean_grid[idx] = (soil_sum_flat[idx] / count_flat[idx]).astype(np.float32)
+            time_mean_grid[idx] = (time_min_sum_flat[idx] / count_flat[idx]).astype(np.float32)
 
-        self.var_soil[t, :, :] = mean_grid.reshape((nlat, nlon))
+        self.var_soil[t, :, :] = soil_mean_grid.reshape((nlat, nlon))
         self.var_count[t, :, :] = count_flat.reshape((nlat, nlon)).astype(np.int32)
+        self.var_obs_time_min[t, :, :] = time_mean_grid.reshape((nlat, nlon))
 
     def close(self) -> None:
         self.ds.close()
@@ -249,13 +274,15 @@ def process_day_payload(args: tuple[int, List[SourceChunk], Dict[Path, List[Tupl
     int,
     np.ndarray,
     np.ndarray,
+    np.ndarray,
 ]:
     """
     Aggregate one day's observations into sum and count arrays on 0.5-degree grid.
     """
     day, chunks, slot_pairs_by_file, target_nlat, target_nlon = args
     ncell = target_nlat * target_nlon
-    target_sum = np.zeros(ncell, dtype=np.float64)
+    target_soil_sum = np.zeros(ncell, dtype=np.float64)
+    target_time_min_sum = np.zeros(ncell, dtype=np.float64)
     target_count = np.zeros(ncell, dtype=np.int32)
 
     chunks_by_file: Dict[Path, List[int]] = defaultdict(list)
@@ -292,10 +319,12 @@ def process_day_payload(args: tuple[int, List[SourceChunk], Dict[Path, List[Tupl
                     target_cells = target_lat.astype(np.int64) * target_nlon + target_lon.astype(np.int64)
 
                     sm_vals = sm_2d[valid].astype(np.float64, copy=False)
-                    target_sum += np.bincount(target_cells, weights=sm_vals, minlength=ncell)
+                    tm_vals = tm_2d[valid].astype(np.float64, copy=False)
+                    target_soil_sum += np.bincount(target_cells, weights=sm_vals, minlength=ncell)
+                    target_time_min_sum += np.bincount(target_cells, weights=tm_vals, minlength=ncell)
                     target_count += np.bincount(target_cells, minlength=ncell)
 
-    return day, target_sum, target_count
+    return day, target_soil_sum, target_time_min_sum, target_count
 
 
 def _iterable_progress(iterable, total: int, show: bool, label: str):
@@ -358,21 +387,35 @@ def main() -> None:
 
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            for day, target_sum, target_count in _iterable_progress(
+            for day, target_soil_sum, target_time_min_sum, target_count in _iterable_progress(
                 ex.map(process_day_payload, tasks),
                 total=len(tasks),
                 show=not args.no_progress,
                 label=f"Upscaling (parallel workers={workers})",
             ):
-                writer.write_day(day, target_sum, target_count, target_nlat, target_nlon)
+                writer.write_day(
+                    day,
+                    target_soil_sum,
+                    target_time_min_sum,
+                    target_count,
+                    target_nlat,
+                    target_nlon,
+                )
     else:
-        for day, target_sum, target_count in _iterable_progress(
+        for day, target_soil_sum, target_time_min_sum, target_count in _iterable_progress(
             (process_day_payload(task) for task in tasks),
             total=len(tasks),
             show=not args.no_progress,
             label="Upscaling (single)",
         ):
-            writer.write_day(day, target_sum, target_count, target_nlat, target_nlon)
+            writer.write_day(
+                day,
+                target_soil_sum,
+                target_time_min_sum,
+                target_count,
+                target_nlat,
+                target_nlon,
+            )
 
     writer.close()
 

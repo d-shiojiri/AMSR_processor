@@ -138,7 +138,17 @@ class Amsr0p5AveragedReader:
 
                 lat_idx, lon_idx = np.nonzero(valid)
                 sm_parts.append(sm_2d[valid])
-                sec_parts.append(np.full(len(lat_idx), int(day_sec0), dtype=np.int64))
+                obs_sec = np.full(len(lat_idx), int(day_sec0), dtype=np.int64)
+                if "observation_time_min" in ds.variables:
+                    tm_2d = np.array(ds.variables["observation_time_min"][time_index, :, :], dtype=np.float32)
+                    tm_vals = tm_2d[valid]
+                    finite_tm = np.isfinite(tm_vals)
+                    if np.any(finite_tm):
+                        obs_sec[finite_tm] = int(day_sec0) + np.rint(tm_vals[finite_tm] * 60.0).astype(
+                            np.int64,
+                            copy=False,
+                        )
+                sec_parts.append(obs_sec)
                 lat_parts.append(self._lat[lat_idx] if self._lat is not None else np.empty(0, dtype=np.float32))
                 lon_parts.append(self._lon[lon_idx] if self._lon is not None else np.empty(0, dtype=np.float32))
 
