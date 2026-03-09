@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Iterable, Tuple
 
@@ -13,6 +14,8 @@ from query_amsr_l3_0p5deg import AmsrUpsampledL3ObservationReader
 from .io_utils import collect_slot_pairs, list_input_files, SEC_PER_DAY
 from .reference import load_reference_paths, ReferenceReader
 from .writer import AveragedProcessedWriter, YearlyProcessedWriter
+
+from tqdm.auto import tqdm
 
 
 def _to_datetime(value: dt.datetime | str) -> dt.datetime:
@@ -153,7 +156,14 @@ def run_cdf_matching(config: CDFMatchConfig) -> None:
     # pass 1: build global CDF mapping from paired AMSR/REF values
     amsr_values: list[float] = []
     ref_values: list[float] = []
-    for _, _, sm, obs_time, lat, lon in reader.iterate_windows(start, end, step=step, window=window):
+    total_windows = int(math.floor((end - start).total_seconds() / step.total_seconds())) + 1
+    pass1_windows = tqdm(
+        reader.iterate_windows(start, end, step=step, window=window),
+        total=max(0, total_windows),
+        desc="CDF pass1 (collect pairs)",
+        unit="win",
+    )
+    for _, _, sm, obs_time, lat, lon in pass1_windows:
         if sm.size == 0:
             continue
         obs_sec = obs_time.astype("datetime64[s]").astype(np.int64)
@@ -211,7 +221,10 @@ def run_cdf_matching(config: CDFMatchConfig) -> None:
         )
 
     # pass 2: re-read input and overwrite AMSR values by CDF ranking
-    for path in input_files:
+    file_iter = tqdm(input_files, total=len(input_files), desc="CDF pass2 (files)", unit="file")
+    day_bar = tqdm(total=None, desc="CDF pass2 (days)", unit="day")
+
+    for path in file_iter:
         with Dataset(path, mode="r") as ds:
             times = np.array(ds.variables["time"][:], dtype=np.int64)
             if times.ndim != 1:
@@ -225,6 +238,7 @@ def run_cdf_matching(config: CDFMatchConfig) -> None:
                 count_var = ds.variables["observation_count"]
 
                 for ti, day in enumerate(times):
+                    day_bar.update(1)
                     if not _within_time_range(int(day), start_sec, end_sec):
                         continue
                     day_val = int(day)
@@ -247,6 +261,7 @@ def run_cdf_matching(config: CDFMatchConfig) -> None:
                     continue
 
                 for ti, day in enumerate(times):
+                    day_bar.update(1)
                     if not _within_time_range(int(day), start_sec, end_sec):
                         continue
                     day_val = int(day)
@@ -267,5 +282,6 @@ def run_cdf_matching(config: CDFMatchConfig) -> None:
 
                     writer.write_day(day_val, year, payload, ds)
 
+    day_bar.close()
     writer.close()
     ref_reader.close()
