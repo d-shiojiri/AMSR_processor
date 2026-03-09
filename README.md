@@ -43,7 +43,7 @@ Use the exact `KEY="value"` format.
 ## 3. Download AMSR data
 
 ```bash
-cd /data02/shiojiri/DATA/AMSR
+cd /path/to/AMSR
 bash AMSR_download.sh
 ```
 
@@ -65,10 +65,10 @@ Typical outputs:
 Merge daily L3 HDF5 files (`*_01D_*.h5`) into NetCDF:
 
 ```bash
-cd /data02/shiojiri/DATA/AMSR
+cd /path/to/AMSR
 python merge_amsr_l3_daily.py \
   --output-mode yearly \
-  --output-dir /data02/shiojiri/DATA/AMSR/processed/l3_daily \
+  --output-dir processed/l3_daily \
   --overwrite
 ```
 
@@ -92,7 +92,7 @@ Output format:
 Upscale merged daily AMSR data to a 0.5-degree daily mean grid:
 
 ```bash
-cd /data02/shiojiri/DATA/AMSR
+cd /path/to/AMSR
 python upscale_amsr_l3_0p5deg.py \
   processed/l3_daily \
   processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
@@ -102,7 +102,7 @@ python upscale_amsr_l3_0p5deg.py \
 Run with default paths:
 
 ```bash
-cd /data02/shiojiri/DATA/AMSR
+cd /path/to/AMSR
 python upscale_amsr_l3_0p5deg.py
 ```
 
@@ -117,8 +117,8 @@ Example with explicit options:
 
 ```bash
 python upscale_amsr_l3_0p5deg.py \
-  /data02/shiojiri/DATA/AMSR/processed/l3_daily \
-  /data02/shiojiri/DATA/AMSR/processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
+  processed/l3_daily \
+  processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
   --overwrite \
   --workers 8
 ```
@@ -163,9 +163,9 @@ Example with yearly SoilMoistV references:
 
 ```bash
 python cdf_match_amsr.py processed/l3_daily \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2016/SoilMoistV.nc \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2017/SoilMoistV.nc \
-  --reference /data02/shiojiri/ILS/global_30min/yard/runs_wo_da/nature_run/2018/SoilMoistV.nc \
+  --reference /path/to/reference/2016/SoilMoistV.nc \
+  --reference /path/to/reference/2017/SoilMoistV.nc \
+  --reference /path/to/reference/2018/SoilMoistV.nc \
   --start 2016-01-01T00:00:00 \
   --end 2018-12-31T23:59:59 \
   --output-dir processed/l3_daily_cdf \
@@ -177,7 +177,7 @@ python cdf_match_amsr.py processed/l3_daily \
 
 ```bash
 python cdf_match_amsr.py processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
-  --reference-dict /data02/shiojiri/DATA/AMSR/reference_paths_template.json \
+  --reference-dict reference_paths_template.json \
   --start 2013-01-01T00:00:00 \
   --end 2022-12-31T23:59:59 \
   --output-dir processed/l3_daily_0p5 \
@@ -189,7 +189,7 @@ For a single output file over multiple years:
 
 ```bash
 python cdf_match_amsr.py processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
-  --reference-dict /data02/shiojiri/DATA/AMSR/reference_paths_template.json \
+  --reference-dict reference_paths_template.json \
   --start 2013-01-01T00:00:00 \
   --end 2022-12-31T23:59:59 \
   --output-dir processed/l3_daily_0p5 \
@@ -230,7 +230,7 @@ python query_amsr_l3_0p5deg.py \
 
 ```bash
 python amsr_l3_query.py \
-  /data02/shiojiri/DATA/AMSR/processed/l3_daily \
+  processed/l3_daily \
   2012-07-03T00:00:00 2012-07-03T23:59:59 \
   --interval-hours 3 \
   --limit 10
@@ -262,7 +262,7 @@ for ws, we, sm, obs_time, lat, lon in reader.iterate_windows(
 ```python
 from amsr_l3_query import AmsrL3ObservationReader
 
-legacy = AmsrL3ObservationReader("/data02/shiojiri/DATA/AMSR/processed/l3_daily")
+legacy = AmsrL3ObservationReader("processed/l3_daily")
 sm, obs_time, lat, lon = legacy.read_range(
     "2012-07-03T00:00:00",
     "2012-07-03T05:59:59",
