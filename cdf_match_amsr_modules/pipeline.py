@@ -236,6 +236,7 @@ def run_cdf_matching(config: CDFMatchConfig) -> None:
                     continue
                 sm_var = ds.variables["soil_moisture"]
                 count_var = ds.variables["observation_count"]
+                obs_time_var = ds.variables["observation_time_min"] if "observation_time_min" in ds.variables else None
 
                 for ti, day in enumerate(times):
                     day_bar.update(1)
@@ -247,6 +248,10 @@ def run_cdf_matching(config: CDFMatchConfig) -> None:
 
                     sm_2d = np.array(sm_var[ti, :, :], dtype=np.float32)
                     count_2d = np.array(count_var[ti, :, :], dtype=np.int32)
+                    if obs_time_var is not None:
+                        obs_time_2d = np.array(obs_time_var[ti, :, :], dtype=np.float32)
+                    else:
+                        obs_time_2d = np.full(sm_2d.shape, np.nan, dtype=np.float32)
                     sm_out = np.array(sm_2d, copy=True)
 
                     valid = np.isfinite(sm_out) & (count_2d > 0)
@@ -254,7 +259,13 @@ def run_cdf_matching(config: CDFMatchConfig) -> None:
                         lat_idx, lon_idx = np.nonzero(valid)
                         sm_out[lat_idx, lon_idx] = map_fn(sm_out[lat_idx, lon_idx])
 
-                    writer.write_day(day_val, year, sm_out.astype(np.float32), count_2d.astype(np.int32))
+                    writer.write_day(
+                        day_val,
+                        year,
+                        sm_out.astype(np.float32),
+                        count_2d.astype(np.int32),
+                        obs_time_2d.astype(np.float32, copy=False),
+                    )
             else:
                 slot_pairs = collect_slot_pairs(ds)
                 if not slot_pairs:

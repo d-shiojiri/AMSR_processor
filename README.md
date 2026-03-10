@@ -210,6 +210,7 @@ Reference input supports:
 - CDF mapping is built from AMSR-reference pairs inside the reference time span.
 - For AMSR periods outside reference coverage, the same mapping table is applied by linear CDF interpolation.
 - For 30-minute references starting at `00:30`, matching still works by same-day pairing at the 0.5-degree daily level.
+- For 0.5-degree averaged input, `observation_time_min` is preserved in CDF output (soil moisture only is bias-corrected).
 
 ---
 

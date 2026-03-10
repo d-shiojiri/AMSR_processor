@@ -13,6 +13,7 @@ class AveragedHandle:
     var_time: object
     var_soil: object
     var_count: object
+    var_obs_time_min: object
     next_index: int = 0
 
 
@@ -85,6 +86,15 @@ class AveragedProcessedWriter:
             chunksizes=(1, min(180, self.nlat), min(360, self.nlon)),
             fill_value=np.int32(0),
         )
+        var_obs_time_min = ds.createVariable(
+            "observation_time_min",
+            "f4",
+            ("time", "lat", "lon"),
+            zlib=True,
+            complevel=4,
+            chunksizes=(1, min(180, self.nlat), min(360, self.nlon)),
+            fill_value=np.float32(np.nan),
+        )
 
         var_lat[:] = self.lat
         var_lon[:] = self.lon
@@ -98,12 +108,21 @@ class AveragedProcessedWriter:
         var_soil.long_name = "daily mean soil moisture (0.5 degree)"
         var_count.units = "1"
         var_count.long_name = "number of merged observations used in daily average"
+        var_obs_time_min.units = "minutes since 00:00 UTC of corresponding time day"
+        var_obs_time_min.long_name = "daily mean observation time (0.5 degree)"
+        var_obs_time_min.comment = "Copied from input; CDF matching does not alter observation timing."
 
         ds.title = "CDF-matched 0.5-degree daily soil moisture"
         ds.source = "CDF matching against provided reference data"
         ds.note = "Output uses the same variable names as merged 0.5-degree averaged files."
 
-        return AveragedHandle(ds=ds, var_time=var_time, var_soil=var_soil, var_count=var_count)
+        return AveragedHandle(
+            ds=ds,
+            var_time=var_time,
+            var_soil=var_soil,
+            var_count=var_count,
+            var_obs_time_min=var_obs_time_min,
+        )
 
     def _get_handle(self, year: int) -> AveragedHandle:
         if self.mode == "single":
@@ -122,6 +141,7 @@ class AveragedProcessedWriter:
         year: int,
         soil_moisture_2d: np.ndarray,
         observation_count_2d: np.ndarray,
+        observation_time_min_2d: np.ndarray,
     ) -> None:
         handle = self._get_handle(year)
         idx = handle.next_index
@@ -129,6 +149,7 @@ class AveragedProcessedWriter:
         handle.next_index += 1
         handle.var_soil[idx, :, :] = soil_moisture_2d
         handle.var_count[idx, :, :] = observation_count_2d
+        handle.var_obs_time_min[idx, :, :] = observation_time_min_2d
 
     def close(self) -> None:
         for handle in self.handles.values():
@@ -267,4 +288,3 @@ class YearlyProcessedWriter:
             handle.ds.max_slots_A = int(handle.max_slots["A"])
             handle.ds.max_slots_D = int(handle.max_slots["D"])
             handle.ds.close()
-
