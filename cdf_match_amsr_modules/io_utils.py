@@ -38,9 +38,15 @@ def normalize_reference_lon(q_lon: Iterable[float], source_lon: Iterable[float])
     src = list(float(x) for x in source_lon)
     if not src:
         return q
-    if min(src) >= -180.0 and max(src) <= 180.0:
-        return q
-    return [((x + 360.0) % 360.0) if x < 0.0 else (x - 360.0 if x >= 360.0 else x) for x in q]
+
+    src_min = min(src)
+    src_max = max(src)
+    if src_min >= -180.0 and src_max <= 180.0:
+        # Reference axis is centered at 0 (e.g., -179.75..179.75).
+        return [((x + 180.0) % 360.0) - 180.0 for x in q]
+
+    # Reference axis is likely 0..360.
+    return [x % 360.0 for x in q]
 
 
 def nearest_index_1d(axis: list[float] | tuple[float, ...] | object, values):
@@ -62,4 +68,3 @@ def nearest_index_1d(axis: list[float] | tuple[float, ...] | object, values):
     if axis_arr[0] < axis_arr[-1]:
         return idx_asc.astype(np.int64)
     return (len(a) - 1 - idx_asc).astype(np.int64)
-

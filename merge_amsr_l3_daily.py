@@ -70,10 +70,14 @@ def inspect_grid_shape(sample_file: Path) -> tuple[int, int]:
         raise ValueError(f"Unexpected Geophysical Data shape in {sample_file}: {g.shape}")
 
 
-def build_lat_lon(nlat: int, nlon: int, resolution_deg: float) -> tuple[np.ndarray, np.ndarray]:
+def build_lat_lon(
+    nlat: int,
+    nlon: int,
+    resolution_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
     # AMSR EQR grid is typically north -> south for latitude.
     lat = (90.0 - resolution_deg / 2.0) - np.arange(nlat, dtype=np.float32) * resolution_deg
-    lon = (-180.0 + resolution_deg / 2.0) + np.arange(nlon, dtype=np.float32) * resolution_deg
+    lon = (resolution_deg / 2.0) + np.arange(nlon, dtype=np.float32) * resolution_deg
     return lat.astype(np.float32), lon.astype(np.float32)
 
 
