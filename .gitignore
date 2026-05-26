@@ -3,6 +3,8 @@ __pychache__/
 
 *.log
 
+download
 download/
 processed
+processed/
 
