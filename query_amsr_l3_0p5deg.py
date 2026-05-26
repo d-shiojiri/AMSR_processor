@@ -9,10 +9,7 @@ from typing import Iterator
 import numpy as np
 from netCDF4 import Dataset
 
-try:
-    from .amsr_l3_query import AmsrL3ObservationReader
-except ImportError:
-    from amsr_l3_query import AmsrL3ObservationReader
+from .amsr_l3_query import AmsrL3ObservationReader
 
 
 EPOCH = dt.datetime(1970, 1, 1)
