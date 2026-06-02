@@ -1,80 +1,17 @@
 from __future__ import annotations
 
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-import math
 from pathlib import Path
-from typing import Iterable, Tuple
 
 import numpy as np
 from netCDF4 import Dataset
-
-from query_amsr_l3_0p5deg import AmsrUpsampledL3ObservationReader
-
-from .io_utils import collect_slot_pairs, list_input_files, SEC_PER_DAY
-from .reference import load_reference_paths, ReferenceReader
-from .writer import AveragedProcessedWriter, YearlyProcessedWriter
-
 from tqdm.auto import tqdm
 
-
-def _to_datetime(value: dt.datetime | str) -> dt.datetime:
-    if isinstance(value, dt.datetime):
-        return value
-    return dt.datetime.fromisoformat(value)
-
-
-def _to_epoch_seconds(value: dt.datetime) -> int:
-    return int((value - dt.datetime(1970, 1, 1)).total_seconds())
-
-
-def _build_rank_mapper(amsr_values: np.ndarray, ref_values: np.ndarray):
-    if amsr_values.size == 0:
-        return None
-    amsr_sorted = np.sort(np.array(amsr_values, dtype=np.float32))
-    ref_sorted = np.sort(np.array(ref_values, dtype=np.float32))
-    n = amsr_sorted.size
-    if n == 0:
-        return None
-
-    cdf = (np.arange(1, n + 1, dtype=np.float64) - 0.5) / n
-    if n == 1:
-        single_val = float(ref_sorted[0])
-
-        def mapper(values: np.ndarray) -> np.ndarray:
-            return np.full(np.asarray(values, dtype=np.float32).shape, single_val, dtype=np.float32)
-
-        return mapper
-
-    def mapper(values: np.ndarray) -> np.ndarray:
-        v = np.array(values, dtype=np.float32)
-        p = np.interp(v.astype(np.float64), amsr_sorted.astype(np.float64), cdf, left=0.0, right=1.0)
-        return np.interp(p, cdf, ref_sorted.astype(np.float64), left=float(ref_sorted[0]), right=float(ref_sorted[-1])).astype(
-            np.float32
-        )
-
-    return mapper
-
-
-def _auto_range_days(reader: AmsrUpsampledL3ObservationReader) -> tuple[dt.datetime, dt.datetime]:
-    if not reader.day_index:
-        raise ValueError("No AMSR records found in input.")
-    day_keys = sorted(reader.day_index.keys())
-    start_sec = int(day_keys[0]) * SEC_PER_DAY
-    end_sec = int(day_keys[-1] + 1) * SEC_PER_DAY - 1
-    return (
-        dt.datetime.utcfromtimestamp(start_sec),
-        dt.datetime.utcfromtimestamp(end_sec),
-    )
-
-
-def _is_averaged_input(ds: Dataset) -> bool:
-    return (
-        "soil_moisture" in ds.variables
-        and "observation_count" in ds.variables
-        and "time" in ds.variables
-        and not collect_slot_pairs(ds)
-    )
+from .io_utils import SEC_PER_DAY, collect_slot_pairs, input_to_m3m3, list_input_files
+from .reference import ReferenceReader, load_reference_paths
+from .writer import create_output_like
 
 
 @dataclass
@@ -88,211 +25,196 @@ class CDFMatchConfig:
     reference_var: str | None
     start: str | None
     end: str | None
-    step_hours: float
-    window_hours: float
     output_dir: Path
-    output_mode: str
     output_file: Path
     overwrite: bool
-    reference_cache_size: int
-    reference_depth: int = 0
+    reference_depth: int
+    block_rows: int
+    workers: int
 
 
-def _within_time_range(day_value: int, start_sec: int | None, end_sec: int | None) -> bool:
-    if start_sec is None and end_sec is None:
-        return True
-    day_start = int(day_value) * SEC_PER_DAY
-    day_end = day_start + SEC_PER_DAY - 1
-    if start_sec is not None and day_end < start_sec:
-        return False
-    if end_sec is not None and day_start > end_sec:
-        return False
-    return True
+def _to_datetime(value: str | None) -> dt.datetime | None:
+    if value is None:
+        return None
+    return dt.datetime.fromisoformat(value)
+
+
+def _day_to_epoch_seconds(day_value: np.ndarray | int) -> np.ndarray:
+    return np.asarray(day_value, dtype=np.int64) * np.int64(SEC_PER_DAY)
+
+
+def _within_range(days: np.ndarray, start: dt.datetime | None, end: dt.datetime | None) -> np.ndarray:
+    mask = np.ones(days.shape, dtype=bool)
+    if start is not None:
+        start_day = int((start - dt.datetime(1970, 1, 1)).total_seconds()) // SEC_PER_DAY
+        mask &= days >= start_day
+    if end is not None:
+        end_day = int((end - dt.datetime(1970, 1, 1)).total_seconds()) // SEC_PER_DAY
+        mask &= days <= end_day
+    return mask
+
+
+def _rank_map_one(raw: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    valid = np.isfinite(raw) & np.isfinite(ref)
+    out = np.full(raw.shape, np.float32(np.nan), dtype=np.float32)
+    if valid.sum() == 0:
+        return out
+    if valid.sum() == 1:
+        out[np.isfinite(raw)] = np.float32(ref[valid][0])
+        return out
+
+    raw_valid = raw[valid].astype(np.float64)
+    ref_valid = ref[valid].astype(np.float64)
+    order_raw = np.argsort(raw_valid)
+    order_ref = np.argsort(ref_valid)
+    raw_sorted = raw_valid[order_raw]
+    ref_sorted = ref_valid[order_ref]
+    n = raw_sorted.size
+    cdf = (np.arange(1, n + 1, dtype=np.float64) - 0.5) / n
+
+    finite_raw = np.isfinite(raw)
+    p = np.interp(raw[finite_raw].astype(np.float64), raw_sorted, cdf, left=0.0, right=1.0)
+    out[finite_raw] = np.interp(p, cdf, ref_sorted, left=ref_sorted[0], right=ref_sorted[-1]).astype(np.float32)
+    return out
+
+
+def _map_flat_range(raw_flat: np.ndarray, ref_flat: np.ndarray, start: int, stop: int) -> tuple[int, np.ndarray]:
+    mapped = np.empty((stop - start, raw_flat.shape[1]), dtype=np.float32)
+    for local, grid in enumerate(range(start, stop)):
+        mapped[local] = _rank_map_one(raw_flat[grid], ref_flat[grid])
+    return start, mapped
+
+
+def _gridwise_map(raw_stack: np.ndarray, ref_stack: np.ndarray, workers: int) -> np.ndarray:
+    # stacks are (sample, row, lon). Map independent grid cells.
+    sample, nrow, nlon = raw_stack.shape
+    raw_flat = raw_stack.reshape(sample, nrow * nlon).T
+    ref_flat = ref_stack.reshape(sample, nrow * nlon).T
+    out_flat = np.empty_like(raw_flat, dtype=np.float32)
+
+    ngrid = raw_flat.shape[0]
+    workers = max(1, int(workers))
+    if workers == 1 or ngrid < 256:
+        out_flat[:] = _map_flat_range(raw_flat, ref_flat, 0, ngrid)[1]
+    else:
+        chunk = max(1, (ngrid + workers - 1) // workers)
+        ranges = [(i, min(i + chunk, ngrid)) for i in range(0, ngrid, chunk)]
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for start, mapped in ex.map(lambda r: _map_flat_range(raw_flat, ref_flat, r[0], r[1]), ranges):
+                out_flat[start:start + mapped.shape[0]] = mapped
+    return out_flat.T.reshape(sample, nrow, nlon)
+
+
+def _reference_for_samples(
+    ref_reader: ReferenceReader,
+    input_lat: np.ndarray,
+    input_lon: np.ndarray,
+    row_slice: slice,
+    day_values: np.ndarray,
+    obs_min: np.ndarray,
+) -> np.ndarray:
+    valid = np.isfinite(obs_min)
+    obs_seconds = np.zeros(obs_min.shape, dtype=np.int64)
+    if valid.any():
+        day_seconds = _day_to_epoch_seconds(day_values)[:, None, None]
+        obs_seconds[valid] = (day_seconds + np.rint(np.where(valid, obs_min, 0.0) * 60.0).astype(np.int64))[valid]
+    flat_obs = obs_seconds[valid]
+    out = np.full(obs_min.shape, np.float32(np.nan), dtype=np.float32)
+    if flat_obs.size == 0:
+        return out
+
+    source_ids, local_ids = ref_reader.nearest_lookup(flat_obs)
+    flat_out = np.full(flat_obs.shape, np.float32(np.nan), dtype=np.float32)
+    flat_pos = np.flatnonzero(valid.ravel())
+    block_shape = obs_min.shape
+
+    for source_id in np.unique(source_ids):
+        src = ref_reader.sources[int(source_id)]
+        pos_source = np.nonzero(source_ids == source_id)[0]
+        for local_id in np.unique(local_ids[pos_source]):
+            pos = pos_source[local_ids[pos_source] == local_id]
+            grid = src.read_block(int(local_id), input_lat, input_lon, row_slice)
+            sample_idx, row_idx, lon_idx = np.unravel_index(flat_pos[pos], block_shape)
+            del sample_idx
+            flat_out[pos] = grid[row_idx, lon_idx]
+    out[valid] = flat_out
+    return out
 
 
 def run_cdf_matching(config: CDFMatchConfig) -> None:
-    input_path = config.input_path
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input path not found: {input_path}")
+    input_files = list_input_files(config.input_path)
+    if len(input_files) != 1:
+        raise NotImplementedError("Grid-wise CDF matching currently expects one 0.5-degree AMSR NetCDF file.")
 
     reference_paths = load_reference_paths(config.reference, config.reference_dict)
-    for p in reference_paths:
-        if not p.exists():
-            raise FileNotFoundError(f"Reference file not found: {p}")
+    for path in reference_paths:
+        if not path.exists():
+            raise FileNotFoundError(f"Reference file not found: {path}")
 
-    input_files = list_input_files(input_path)
-    reader = AmsrUpsampledL3ObservationReader(
-        input_path,
-        interval_hours=config.step_hours,
-        window_hours=config.window_hours,
-    )
-
-    start = _to_datetime(config.start) if config.start else None
-    end = _to_datetime(config.end) if config.end else None
-    if start is None or end is None:
-        auto_start, auto_end = _auto_range_days(reader)
-        if start is None:
-            start = auto_start
-        if end is None:
-            end = auto_end
-    if end < start:
-        raise ValueError("end must be >= start")
-
-    start_sec = _to_epoch_seconds(start)
-    end_sec = _to_epoch_seconds(end)
-    step = dt.timedelta(hours=config.step_hours)
-    window = dt.timedelta(hours=config.window_hours)
+    start = _to_datetime(config.start)
+    end = _to_datetime(config.end)
 
     ref_reader = ReferenceReader(
-        paths=reference_paths,
+        reference_paths,
         time_name=config.reference_time,
         lat_name=config.reference_lat,
         lon_name=config.reference_lon,
         ref_var_name=config.reference_var,
         reference_depth=config.reference_depth,
-        cache_size=config.reference_cache_size,
     )
 
-    # pass 1: build global CDF mapping from paired AMSR/REF values
-    amsr_values: list[float] = []
-    ref_values: list[float] = []
-    total_windows = int(math.floor((end - start).total_seconds() / step.total_seconds())) + 1
-    pass1_windows = tqdm(
-        reader.iterate_windows(start, end, step=step, window=window),
-        total=max(0, total_windows),
-        desc="CDF pass1 (collect pairs)",
-        unit="win",
-    )
-    for _, _, sm, obs_time, lat, lon in pass1_windows:
-        if sm.size == 0:
-            continue
-        obs_sec = obs_time.astype("datetime64[s]").astype(np.int64)
-        ref_at_obs = ref_reader.sample(obs_sec, lat, lon, require_within_reference=True)
-        valid = np.isfinite(sm) & np.isfinite(ref_at_obs)
-        if not np.any(valid):
-            continue
-        amsr_values.append(np.asarray(sm[valid], dtype=np.float32).tolist())
-        ref_values.append(np.asarray(ref_at_obs[valid], dtype=np.float32).tolist())
+    input_path = input_files[0]
+    output_path = config.output_dir / config.output_file
+    try:
+        with Dataset(input_path, "r") as src:
+            slot_pairs = collect_slot_pairs(src)
+            if not slot_pairs:
+                raise ValueError(
+                    "Input file must contain soil_moisture/observation_time_min "
+                    "or slot variables like soil_moisture_A_01."
+                )
 
-    amsr_values_arr = np.array(np.concatenate(amsr_values), dtype=np.float32) if amsr_values else np.empty(0, dtype=np.float32)
-    ref_values_arr = np.array(np.concatenate(ref_values), dtype=np.float32) if ref_values else np.empty(0, dtype=np.float32)
-    if amsr_values_arr.size == 0:
-        ref_reader.close()
-        raise ValueError("No valid AMSR-reference pairs in the given range.")
+            times = np.asarray(src.variables["time"][:], dtype=np.int64)
+            time_mask = _within_range(times, start, end)
+            selected = np.flatnonzero(time_mask)
+            if selected.size == 0:
+                raise ValueError("No input days are inside the requested time range.")
 
-    map_fn = _build_rank_mapper(amsr_values_arr, ref_values_arr)
-    if map_fn is None:
-        ref_reader.close()
-        raise ValueError("CDF map creation failed.")
+            lat = np.asarray(src.variables["lat"][:], dtype=np.float64)
+            lon = np.asarray(src.variables["lon"][:], dtype=np.float64)
+            nlat = lat.size
 
-    # output writer (same shape/variables as input layout)
-    with Dataset(input_files[0], mode="r") as probe:
-        lat = np.array(probe.variables["lat"][:], dtype=np.float32)
-        lon = np.array(probe.variables["lon"][:], dtype=np.float32)
-        time_units = getattr(probe.variables["time"], "units", "days since 1970-01-01")
-        has_slot_pairs = bool(collect_slot_pairs(probe))
-        is_averaged = _is_averaged_input(probe)
-        if not has_slot_pairs and not is_averaged:
-            raise ValueError("Input NetCDF does not match supported formats (slot-based or 0.5-degree averaged).")
+            with create_output_like(output_path, src, slot_pairs, config.overwrite) as dst:
+                block_rows = max(1, int(config.block_rows))
+                pbar = tqdm(range(0, nlat, block_rows), desc="grid-wise CDF", unit="block")
+                for row0 in pbar:
+                    row1 = min(row0 + block_rows, nlat)
+                    row_slice = slice(row0, row1)
 
-    if is_averaged:
-        writer = AveragedProcessedWriter(
-            output_dir=config.output_dir,
-            output_file=config.output_file,
-            mode=config.output_mode,
-            overwrite=config.overwrite,
-            nlat=lat.size,
-            nlon=lon.size,
-            lat=lat,
-            lon=lon,
-            time_units=time_units,
-        )
-    else:
-        writer = YearlyProcessedWriter(
-            output_dir=config.output_dir,
-            output_file=config.output_file,
-            mode=config.output_mode,
-            overwrite=config.overwrite,
-            nlat=lat.size,
-            nlon=lon.size,
-            lat=lat,
-            lon=lon,
-            time_units=time_units,
-        )
+                    raw_samples: list[np.ndarray] = []
+                    ref_samples: list[np.ndarray] = []
+                    sample_targets: list[tuple[str, np.ndarray]] = []
 
-    # pass 2: re-read input and overwrite AMSR values by CDF ranking
-    file_iter = tqdm(input_files, total=len(input_files), desc="CDF pass2 (files)", unit="file")
-    day_bar = tqdm(total=None, desc="CDF pass2 (days)", unit="day")
-
-    for path in file_iter:
-        with Dataset(path, mode="r") as ds:
-            times = np.array(ds.variables["time"][:], dtype=np.int64)
-            if times.ndim != 1:
-                raise ValueError(f"{path} time variable must be 1D.")
-            lat_src = np.array(ds.variables["lat"][:], dtype=np.float32)
-            lon_src = np.array(ds.variables["lon"][:], dtype=np.float32)
-            if is_averaged:
-                if "soil_moisture" not in ds.variables or "observation_count" not in ds.variables:
-                    continue
-                sm_var = ds.variables["soil_moisture"]
-                count_var = ds.variables["observation_count"]
-                obs_time_var = ds.variables["observation_time_min"] if "observation_time_min" in ds.variables else None
-
-                for ti, day in enumerate(times):
-                    day_bar.update(1)
-                    if not _within_time_range(int(day), start_sec, end_sec):
-                        continue
-                    day_val = int(day)
-                    day_origin = dt.datetime(1970, 1, 1) + dt.timedelta(seconds=day_val * SEC_PER_DAY)
-                    year = day_origin.year
-
-                    sm_2d = np.array(sm_var[ti, :, :], dtype=np.float32)
-                    count_2d = np.array(count_var[ti, :, :], dtype=np.int32)
-                    if obs_time_var is not None:
-                        obs_time_2d = np.array(obs_time_var[ti, :, :], dtype=np.float32)
-                    else:
-                        obs_time_2d = np.full(sm_2d.shape, np.nan, dtype=np.float32)
-                    sm_out = np.array(sm_2d, copy=True)
-
-                    valid = np.isfinite(sm_out) & (count_2d > 0)
-                    if np.any(valid):
-                        lat_idx, lon_idx = np.nonzero(valid)
-                        sm_out[lat_idx, lon_idx] = map_fn(sm_out[lat_idx, lon_idx])
-
-                    writer.write_day(
-                        day_val,
-                        year,
-                        sm_out.astype(np.float32),
-                        count_2d.astype(np.int32),
-                        obs_time_2d.astype(np.float32, copy=False),
-                    )
-            else:
-                slot_pairs = collect_slot_pairs(ds)
-                if not slot_pairs:
-                    continue
-
-                for ti, day in enumerate(times):
-                    day_bar.update(1)
-                    if not _within_time_range(int(day), start_sec, end_sec):
-                        continue
-                    day_val = int(day)
-                    day_origin = dt.datetime(1970, 1, 1) + dt.timedelta(seconds=day_val * SEC_PER_DAY)
-                    year = day_origin.year
-
-                    payload: list[Tuple[str, str, np.ndarray, np.ndarray]] = []
                     for sm_name, tm_name in slot_pairs:
-                        sm_2d = np.array(ds.variables[sm_name][ti, :, :], dtype=np.float32)
-                        tm_2d = np.array(ds.variables[tm_name][ti, :, :], dtype=np.float32)
-                        sm_out = np.array(sm_2d, copy=True)
+                        sm_var = src.variables[sm_name]
+                        tm_var = src.variables[tm_name]
+                        units = getattr(sm_var, "units", None)
 
-                        valid = np.isfinite(sm_out) & np.isfinite(tm_2d)
-                        if np.any(valid):
-                            lat_idx, lon_idx = np.nonzero(valid)
-                            sm_out[lat_idx, lon_idx] = map_fn(sm_out[lat_idx, lon_idx])
-                        payload.append((sm_name, tm_name, sm_out.astype(np.float32), tm_2d.astype(np.float32)))
+                        sm = input_to_m3m3(sm_var[selected, row_slice, :], units=units)
+                        tm = np.asarray(tm_var[selected, row_slice, :], dtype=np.float32)
+                        ref = _reference_for_samples(ref_reader, lat, lon, row_slice, times[selected], tm)
+                        raw_samples.append(sm)
+                        ref_samples.append(ref)
+                        sample_targets.append((sm_name, selected))
 
-                    writer.write_day(day_val, year, payload, ds)
+                    raw_stack = np.concatenate(raw_samples, axis=0)
+                    ref_stack = np.concatenate(ref_samples, axis=0)
+                    mapped_stack = _gridwise_map(raw_stack, ref_stack, config.workers)
 
-    day_bar.close()
-    writer.close()
-    ref_reader.close()
+                    offset = 0
+                    for (sm_name, selected_idx), sm in zip(sample_targets, raw_samples):
+                        n = sm.shape[0]
+                        dst.variables[sm_name][selected_idx, row_slice, :] = mapped_stack[offset:offset + n]
+                        offset += n
+    finally:
+        ref_reader.close()

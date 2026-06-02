@@ -43,7 +43,7 @@ Use the exact `KEY="value"` format.
 ## 3. Download AMSR data
 
 ```bash
-cd /path/to/AMSR
+cd yard/AMSR_processor
 bash AMSR_download.sh
 ```
 
@@ -65,7 +65,7 @@ Typical outputs:
 Merge daily L3 HDF5 files (`*_01D_*.h5`) into NetCDF:
 
 ```bash
-cd /path/to/AMSR
+cd yard/AMSR_processor
 python merge_amsr_l3_daily.py \
   --output-mode yearly \
   --output-dir processed/l3_daily \
@@ -92,7 +92,7 @@ Output format:
 Upscale merged daily AMSR data to a 0.5-degree daily mean grid:
 
 ```bash
-cd /path/to/AMSR
+cd yard/AMSR_processor
 python upscale_amsr_l3_0p5deg.py \
   processed/l3_daily \
   processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
@@ -102,7 +102,7 @@ python upscale_amsr_l3_0p5deg.py \
 Run with default paths:
 
 ```bash
-cd /path/to/AMSR
+cd yard/AMSR_processor
 python upscale_amsr_l3_0p5deg.py
 ```
 
@@ -135,9 +135,13 @@ Output variables:
 
 ## 6. CDF matching for AMSR-L3 (bias correction)
 
-`cdf_match_amsr.py` performs bias correction by CDF matching.
+`cdf_match_amsr.py` performs grid-wise bias correction by CDF matching. Each
+0.5-degree grid cell gets its own AMSR-reference CDF, built only from paired
+samples at that grid cell.
 
 ### CLI
+
+Run this from the `yard/AMSR_processor` directory:
 
 ```bash
 python cdf_match_amsr.py <amsr_input_path> \
@@ -151,31 +155,17 @@ python cdf_match_amsr.py <amsr_input_path> \
   [--reference-depth <depth_index>] \
   [--start <YYYY-MM-DDTHH:MM:SS>] \
   [--end <YYYY-MM-DDTHH:MM:SS>] \
-  [--step-hours <hours>] \
-  [--window-hours <hours>] \
-  [--output-dir processed/l3_daily_cdf] \
-  [--output-mode yearly|single] \
+  [--output-dir processed/l3_daily_0p5] \
   [--output-file AMSR_SMC_daily_cdf.nc] \
+  [--block-rows <nlat_rows>] \
+  [--workers <threads>] \
   [--overwrite]
 ```
 
-Example with yearly SoilMoistV references:
+0.5-degree daily file example:
 
 ```bash
-python cdf_match_amsr.py processed/l3_daily \
-  --reference /path/to/reference/2016/SoilMoistV.nc \
-  --reference /path/to/reference/2017/SoilMoistV.nc \
-  --reference /path/to/reference/2018/SoilMoistV.nc \
-  --start 2016-01-01T00:00:00 \
-  --end 2018-12-31T23:59:59 \
-  --output-dir processed/l3_daily_cdf \
-  --output-mode yearly \
-  --overwrite
-```
-
-0.5-degree daily file example (single and multi-year):
-
-```bash
+cd yard/AMSR_processor
 python cdf_match_amsr.py processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
   --reference-dict reference_paths_template.json \
   --start 2013-01-01T00:00:00 \
@@ -185,16 +175,18 @@ python cdf_match_amsr.py processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
   --overwrite
 ```
 
-For a single output file over multiple years:
+High-core node example:
 
 ```bash
+cd yard/AMSR_processor
 python cdf_match_amsr.py processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
   --reference-dict reference_paths_template.json \
   --start 2013-01-01T00:00:00 \
   --end 2022-12-31T23:59:59 \
   --output-dir processed/l3_daily_0p5 \
-  --output-mode single \
-  --output-file AMSR_SMC_daily_0p5deg_cdf_2013_2022.nc \
+  --output-file AMSR_SMC_daily_0p5deg_cdf.nc \
+  --block-rows 8 \
+  --workers 192 \
   --overwrite
 ```
 
@@ -207,10 +199,11 @@ Reference input supports:
 ### Notes
 
 - `--reference-depth` defaults to `0` if omitted.
-- CDF mapping is built from AMSR-reference pairs inside the reference time span.
-- For AMSR periods outside reference coverage, the same mapping table is applied by linear CDF interpolation.
-- For 30-minute references starting at `00:30`, matching still works by same-day pairing at the 0.5-degree daily level.
-- For 0.5-degree averaged input, `observation_time_min` is preserved in CDF output (soil moisture only is bias-corrected).
+- Dask is not used. The job streams latitude blocks and parallelizes independent grid-cell mappings with threads.
+- `--block-rows` controls memory use. Increase it only when the node has enough memory.
+- AMSR input values stored as percent are converted to m3/m3 before CDF matching.
+- Output soil moisture variables use units `m3 m-3`.
+- Observation time variables are preserved in the CDF output.
 
 ---
 
