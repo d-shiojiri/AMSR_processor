@@ -144,63 +144,53 @@ samples at that grid cell.
 Run this from the `yard/AMSR_processor` directory:
 
 ```bash
-python cdf_match_amsr.py <amsr_input_path> \
-  --reference <ref_nc_or_glob> \
-  [--reference <another_ref_nc>] ... \
-  [--reference-dict <json_file>] \
-  [--reference-time <name>] \
-  [--reference-lat <name>] \
-  [--reference-lon <name>] \
-  [--reference-var <name>] \
-  [--reference-depth <depth_index>] \
-  [--start <YYYY-MM-DDTHH:MM:SS>] \
-  [--end <YYYY-MM-DDTHH:MM:SS>] \
-  [--output-dir processed/l3_daily_0p5] \
-  [--output-file AMSR_SMC_daily_cdf.nc] \
-  [--block-rows <nlat_rows>] \
-  [--workers <threads>] \
-  [--overwrite]
+python cdf_match_amsr.py --overwrite
 ```
 
-0.5-degree daily file example:
+This uses the standard paths:
+
+- input: `processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc`
+- reference dictionary: `reference_paths_template.json`
+- output: `processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_cdf.nc`
+
+The processing period is inferred from the reference files listed in
+`reference_paths_template.json`; explicit `--start` and `--end` are normally
+not needed.
+
+Explicit path example:
 
 ```bash
 cd yard/AMSR_processor
 python cdf_match_amsr.py processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
-  --reference-dict reference_paths_template.json \
-  --start 2013-01-01T00:00:00 \
-  --end 2022-12-31T23:59:59 \
-  --output-dir processed/l3_daily_0p5 \
-  --output-file AMSR_SMC_daily_0p5deg_cdf.nc \
   --overwrite
 ```
 
-High-core node example:
+Optional tuning example:
 
 ```bash
 cd yard/AMSR_processor
-python cdf_match_amsr.py processed/l3_daily_0p5/AMSR_SMC_daily_0p5deg_avg.nc \
-  --reference-dict reference_paths_template.json \
-  --start 2013-01-01T00:00:00 \
-  --end 2022-12-31T23:59:59 \
-  --output-dir processed/l3_daily_0p5 \
-  --output-file AMSR_SMC_daily_0p5deg_cdf.nc \
-  --block-rows 8 \
+python cdf_match_amsr.py \
+  --block-rows 180 \
+  --map-columns 4096 \
   --workers 192 \
   --overwrite
 ```
 
 Reference input supports:
 
-- repeated `--reference`
 - `--reference-dict` as a file path or JSON string
 - yearly dictionary or `path_template` format
 
 ### Notes
 
+- `reference_paths_template.json` is required unless `--reference-dict` points to another reference dictionary.
+- `--start` and `--end` are optional overrides. If omitted, the reference file time coverage is used.
 - `--reference-depth` defaults to `0` if omitted.
 - Dask is not used. The job streams latitude blocks and parallelizes independent grid-cell mappings with threads.
-- `--block-rows` controls memory use. Increase it only when the node has enough memory.
+- `--reference-time-mode slot-median` uses one representative observation time for each slot/day/block and is the default fast mode.
+- `--reference-time-mode pixel` uses each grid cell's observation time exactly, but it can be extremely slow with time-chunked reference files.
+- `--block-rows 180` matches the current nature-run `SoilMoistV` latitude chunking and avoids rereading the same HDF5 chunks.
+- `--map-columns` controls CDF mapping memory use inside each latitude block.
 - AMSR input values stored as percent are converted to m3/m3 before CDF matching.
 - Output soil moisture variables use units `m3 m-3`.
 - Observation time variables are preserved in the CDF output.

@@ -139,6 +139,62 @@ class ReferenceSource:
         choose_left = (obs_seconds - self.time_seconds[left]) <= (self.time_seconds[right] - obs_seconds)
         return np.where(choose_left, left, right).astype(np.int64)
 
+    @staticmethod
+    def _contiguous_slice(indices: np.ndarray) -> tuple[slice, bool] | None:
+        indices = np.asarray(indices, dtype=np.int64)
+        if indices.size == 0:
+            return None
+        if indices.size == 1:
+            return slice(int(indices[0]), int(indices[0]) + 1), False
+        diffs = np.diff(indices)
+        if np.all(diffs == 1):
+            return slice(int(indices[0]), int(indices[-1]) + 1), False
+        if np.all(diffs == -1):
+            return slice(int(indices[-1]), int(indices[0]) + 1), True
+        return None
+
+    def read_block_times(
+        self,
+        time_indices: np.ndarray,
+        input_lat: np.ndarray,
+        input_lon: np.ndarray,
+        row_slice: slice,
+    ) -> np.ndarray:
+        time_indices = np.asarray(time_indices, dtype=np.int64)
+        lat_idx = nearest_index_1d(self.lat, input_lat[row_slice])
+        lon_idx = nearest_index_1d(self.lon, normalize_lon(input_lon, self.lon))
+        lat_slice = self._contiguous_slice(lat_idx)
+        lon_slice = self._contiguous_slice(lon_idx)
+        if lat_slice is None or lon_slice is None:
+            return np.stack(
+                [self.read_block(int(time_index), input_lat, input_lon, row_slice) for time_index in time_indices],
+                axis=0,
+            )
+
+        var = self.ds.variables[self.var_name]
+        dims = list(var.dimensions)
+        indexes = [slice(None)] * var.ndim
+        indexes[dims.index(self.time_name)] = time_indices
+        indexes[dims.index(self.lat_name)] = lat_slice[0]
+        indexes[dims.index(self.lon_name)] = lon_slice[0]
+        if self.depth_axis >= 0:
+            indexes[self.depth_axis] = int(self.depth_index)
+
+        raw = np.asarray(var[tuple(indexes)], dtype=np.float32)
+        remaining_axes = [i for i, indexer in enumerate(indexes) if not isinstance(indexer, (int, np.integer))]
+        target_axes = [
+            remaining_axes.index(dims.index(self.time_name)),
+            remaining_axes.index(dims.index(self.lat_name)),
+            remaining_axes.index(dims.index(self.lon_name)),
+        ]
+        if target_axes != [0, 1, 2]:
+            raw = np.moveaxis(raw, target_axes, [0, 1, 2])
+        if lat_slice[1]:
+            raw = raw[:, ::-1, :]
+        if lon_slice[1]:
+            raw = raw[:, :, ::-1]
+        return raw.astype(np.float32, copy=False)
+
     def read_block(self, time_index: int, input_lat: np.ndarray, input_lon: np.ndarray, row_slice: slice) -> np.ndarray:
         lat_idx = nearest_index_1d(self.lat, input_lat[row_slice])
         lon_idx = nearest_index_1d(self.lon, normalize_lon(input_lon, self.lon))
